@@ -239,6 +239,10 @@ var Commands = []cli.Command{
 				Name:  "unset, u",
 				Usage: "Unset variables instead of setting them",
 			},
+			cli.BoolFlag{
+				Name:  "no-proxy",
+				Usage: "Add docker endpoint to NO_PROXY environment variable",
+			},
 		},
 	},
 	{
@@ -483,6 +487,71 @@ func cmdRm(c *cli.Context) {
 
 func cmdEnv(c *cli.Context) {
 	userShell := filepath.Base(os.Getenv("SHELL"))
+	cfg, err := getMachineConfig(c)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	dockerHost := cfg.machineUrl
+
+	if c.Bool("no-proxy") {
+		//extract the ip from the docker host
+		mUrl, err := url.Parse(cfg.machineUrl)
+		if err != nil {
+			log.Fatal(err)
+		}
+		mParts := strings.Split(mUrl.Host, ":")
+		ip := mParts[0]
+
+		//first check for an existing lower case no_proxy var
+		no_proxy_var := "no_proxy"
+		no_proxy_value := os.Getenv("no_proxy")
+		//otherwise default to allcaps HTTP_PROXY
+		if no_proxy_value == "" {
+			no_proxy_var = "NO_PROXY"
+			no_proxy_value = os.Getenv("NO_PROXY")
+		}
+
+		if c.Bool("unset") {
+			//remove the docker host from the no_proxy list
+			if strings.Contains(no_proxy_value, ip) {
+				no_proxy_entries := strings.Split(no_proxy_value, ",")
+				for idx, val := range no_proxy_entries {
+					if val == ip {
+						no_proxy_value = strings.Join(append(no_proxy_entries[:idx], no_proxy_entries[idx+1:]...), ",")
+						break
+					}
+				}
+			}
+		} else {
+			//add the docker host to the no_proxy list idempotently
+			switch {
+			case no_proxy_value == "":
+				no_proxy_value = ip
+			case strings.Contains(no_proxy_value, ip):
+				//ip already in no_proxy list, nothing to do
+			default:
+				no_proxy_value = fmt.Sprintf("%s,%s", no_proxy_value, ip)
+			}
+		}
+
+		switch userShell {
+		case "fish":
+			if no_proxy_value == "" {
+				fmt.Printf("set -e %s\n", no_proxy_var)
+			} else {
+				fmt.Printf("set -x %s %s\n", no_proxy_var, no_proxy_value)
+			}
+		default:
+			if no_proxy_value == "" {
+				fmt.Printf("unset %s\n", no_proxy_var)
+			} else {
+				fmt.Printf("export %s=%s\n", no_proxy_var, no_proxy_value)
+			}
+		}
+
+	}
+
 	if c.Bool("unset") {
 		switch userShell {
 		case "fish":
@@ -493,12 +562,6 @@ func cmdEnv(c *cli.Context) {
 		return
 	}
 
-	cfg, err := getMachineConfig(c)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	dockerHost := cfg.machineUrl
 	if c.Bool("swarm") {
 		if !cfg.swarmMaster {
 			log.Fatalf("%s is not a swarm master", cfg.machineName)
